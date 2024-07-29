@@ -26,15 +26,15 @@ dtype = torch.float32 # Choose float32 or 64 etc.
 
 
 ## Settings for the reachability map:
-robot_urdf = "tiago_dual.urdf"
-name_end_effector = "gripper_left_grasping_frame" # "arm_left_tool_link"
+robot_urdf = "soar.urdf"
+name_end_effector = "link_tcp_extension" # "arm_left_tool_link"
 name_base_link = "base_footprint"
 n_dof = 8 # Implied from the URDF and chosen links
 use_torso = False
 n_dof = 8 # Implied from the URDF and chosen links. 'use_torso=False' will reduce this by one in practice
 # Number of DOFs and joint limits
-joint_pos_min = torch.tensor([0.0, -1.1780972451, -1.1780972451, -0.785398163397, -0.392699081699, -2.09439510239, -1.41371669412, -2.09439510239], dtype=dtype, device=d)
-joint_pos_max = torch.tensor([+0.35, +1.57079632679, +1.57079632679, +3.92699081699, +2.35619449019, +2.09439510239, +1.41371669412, +2.09439510239], dtype=dtype, device=d)
+joint_pos_min = torch.tensor([0.0, -2.6, -2.059, -3.141, -0.19198, -3.141, -1.57, -3.141], dtype=dtype, device=d)
+joint_pos_max = torch.tensor([+0.4, +0.506, +2.0944, +3.141, +3.927, +3.141, +3.141, +3.141], dtype=dtype, device=d)
 ## Build kinematic chain from URDF
 print("[Building kinematic chain from URDF...]:\n...\n...")
 chain = pk.build_serial_chain_from_urdf(open(robot_urdf).read(), name_end_effector)
@@ -107,7 +107,7 @@ for seg in range(num_segments):
     # Get reach_map segment and get it's inverse transform for calculation
     inv_transfs_batch = inv_transfs[seg*N_ik_loop:(seg+1)*N_ik_loop].to(device=d)
 
-    for trial in range(n_trials):        
+    for trial in range(n_trials):
         # Sample start joint config
         th_batch = sampling_distr.sample([N_ik_loop])
         if not use_torso:
@@ -120,14 +120,14 @@ for seg in range(num_segments):
             torch.cuda.empty_cache() # Keep clearing cache to get rid of redundant variables
             transf_des_to_curr = torch.transpose(torch.bmm(inv_transfs_batch,ee_transf_batch),1,2) # batch of transfs (desired pose to current pose)
             log_err_batch = pk.transforms.se3.se3_log_map(transf_des_to_curr, eps=0.005) # se3_log function expects transposed transform
-            
+
             # Calc Jacobian
             J = chain.jacobian(th_batch)
             if not use_torso:
                 # Exclude torso joint jacobian
                 J = J[:,:,1:] # Excluding first (torso) joint
             torch.cuda.empty_cache()
-            
+
             # Calculate change in joint position: v = - J.T.dot(torch.linalg.solve(J.dot(J.T) + damp * np.eye(6), err))
             pseudoInv_times_err = torch.linalg.solve(torch.bmm(J,torch.transpose(J,1,2)) + (damp_coeff * torch.eye(6,device=d)), log_err_batch)
             v = -torch.squeeze(torch.bmm(torch.transpose(J,1,2),torch.unsqueeze(pseudoInv_times_err,dim=2)))
@@ -150,12 +150,12 @@ for seg in range(num_segments):
 
         # Check for IK success i.e. error is less than threshold
         success_mask = (log_err_batch[:,0:3].pow(2).sum(dim=1) < ik_pos_sq_error_thresh) & (log_err_batch[:,3:6].pow(2).sum(dim=1) < ik_ang_sq_error_thresh)
-        
+
         # Calculate score (Manipulability) and copy to CPU
         M = torch.det(J[success_mask] @ torch.transpose(J[success_mask],1,2)).cpu() # Yoshikawa manipulability measure
         del th_batch, J, log_err_batch
         torch.cuda.empty_cache()
-        
+
         # Add Visitation and (Average) Manipulability to Reachability Map
         reach_map_seg = reach_map[seg*N_ik_loop:(seg+1)*N_ik_loop]
         reach_map_seg[success_mask,-1] *= reach_map_seg[success_mask,-2] # Accumulate Manipulability. M*Visitation Frequency
@@ -169,7 +169,7 @@ for seg in range(num_segments):
 nonzero_scores = torch.abs(reach_map[:,6:]).sum(dim=1) > 0
 reach_map_nonzero = reach_map[nonzero_scores].numpy()
 
-with open(reach_map_file_path+reach_map_file_name+'.pkl', 'wb') as f:            
+with open(reach_map_file_path+reach_map_file_name+'.pkl', 'wb') as f:
     pickle.dump(reach_map_nonzero,f) # Save only non-zero entries
     # pickle.dump(reach_map,f) # Optional: Save full map to add entries to it later
 
@@ -181,7 +181,7 @@ while(indx < reach_map_nonzero.shape[0]):
     sphere_3d = reach_map_nonzero[indx][:3]
     # Count num_repetitions of current 3D sphere (in the next z_ind_offset subarray)
     num_repetitions = (reach_map_nonzero[indx:indx+z_ind_offset][:,:3] == sphere_3d).all(axis=1).sum().astype(dtype=np.int16)
-    # Store sphere and average manipulability as the score. (Also, scale by a factor)    
+    # Store sphere and average manipulability as the score. (Also, scale by a factor)
     Manip_avg = reach_map_nonzero[indx:indx+num_repetitions, 7].mean()*Manip_scaling
     if first:
         first = False

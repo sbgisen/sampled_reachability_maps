@@ -25,14 +25,14 @@ dtype = torch.float32 # Choose float32 or 64 etc.
 
 
 ## Settings for the reachability map:
-robot_urdf = "tiago_dual.urdf"
-name_end_effector = "gripper_left_grasping_frame" # "arm_left_tool_link"
+robot_urdf = "soar.urdf"
+name_end_effector = "link_tcp_extension" # "arm_left_tool_link"
 name_base_link = "base_footprint"
 use_torso = False
 n_dof = 8 # Implied from the URDF and chosen links. 'use_torso=False' will reduce this by one in practice
 # Number of DOFs and joint limits
-joint_pos_min = torch.tensor([0.0, -1.1780972451, -1.1780972451, -0.785398163397, -0.392699081699, -2.09439510239, -1.41371669412, -2.09439510239], dtype=dtype, device=d)
-joint_pos_max = torch.tensor([+0.35, +1.57079632679, +1.57079632679, +3.92699081699, +2.35619449019, +2.09439510239, +1.41371669412, +2.09439510239], dtype=dtype, device=d)
+joint_pos_min = torch.tensor([0.0, -2.6, -2.059, -3.141, -0.19198, -3.141, -1.57, -3.141], dtype=dtype, device=d)
+joint_pos_max = torch.tensor([+0.4, +0.506, +2.0944, +3.141, +3.927, +3.141, +3.141, +3.141], dtype=dtype, device=d)
 joint_pos_centers = joint_pos_min + (joint_pos_max - joint_pos_min)/2
 joint_pos_range_sq = (joint_pos_max - joint_pos_min).pow(2)/4
 ## Build kinematic chain from URDF
@@ -167,15 +167,15 @@ for i in range(num_loops):
         # Print loop computation time
         t_comp = time.perf_counter() - loop_t0
         print("Loop: " + str(i) + ". Comp Time = {0:.9e}s".format(t_comp))
-        
+
         # Save reachability map to file (as numpy pkl)
         nonzero_rows = torch.abs(reach_map).sum(dim=1) > 0
         reach_map_nonzero = reach_map[nonzero_rows].numpy()
 
-        with open(reach_map_file_path+reach_map_file_name+'.pkl', 'wb') as f:            
+        with open(reach_map_file_path+reach_map_file_name+'.pkl', 'wb') as f:
             pickle.dump(reach_map_nonzero,f) # Save only non-zero entries
             # pickle.dump(reach_map,f) # Optional: Save full map to add entries to it later
-        
+
         # Accumulate 6D voxel scores into 3D sphere scores (for visualization)
         indx = 0
         first = True
