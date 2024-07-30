@@ -11,6 +11,15 @@ import torch
 import time
 import pdb
 
+import numpy as np
+import rospy
+from curobo.types.base import TensorDeviceType
+from curobo.types.math import Pose
+from curobo.types.robot import RobotConfig
+from curobo.util_file import load_yaml
+from curobo.wrap.reacher.ik_solver import IKSolver, IKSolverConfig
+from tf.transformations import quaternion_from_euler
+
 ### Code to create a reachability map using pytorch forward kinematics (GPU-based tensor calculations)
 
 
@@ -23,6 +32,11 @@ else:
     d = "cpu"
 dtype = torch.float32 # Choose float32 or 64 etc.
 
+tensor_args = TensorDeviceType()
+config_file = rospy.get_param('/curobo/robot_config')
+robot_config = RobotConfig.from_dict(config_file)
+ik_config = IKSolverConfig.load_from_robot_config(robot_config, rotation_threshold=0.05, position_threshold=0.005, num_seeds=20, self_collision_check=True, self_collision_opt=True, tensor_args=tensor_args, use_cuda_graph=True)
+ik_solver = IKSolver(ik_config)
 
 ## Settings for the reachability map:
 robot_urdf = "soar.urdf"
@@ -32,7 +46,7 @@ use_torso = False
 n_dof = 8 # Implied from the URDF and chosen links. 'use_torso=False' will reduce this by one in practice
 # Number of DOFs and joint limits
 joint_pos_min = torch.tensor([0.0, -2.6, -2.059, -3.141, -0.19198, -3.141, -1.57, -3.141], dtype=dtype, device=d)
-joint_pos_max = torch.tensor([+0.4, +0.506, +2.0944, +3.141, +3.927, +3.141, +3.141, +3.141], dtype=dtype, device=d)
+joint_pos_max = torch.tensor([+0.3, +0.506, +2.0944, +3.141, +3.927, +3.141, +3.141, +3.141], dtype=dtype, device=d)
 joint_pos_centers = joint_pos_min + (joint_pos_max - joint_pos_min)/2
 joint_pos_range_sq = (joint_pos_max - joint_pos_min).pow(2)/4
 ## Build kinematic chain from URDF
@@ -42,7 +56,9 @@ chain = chain.to(dtype=dtype, device=d)
 assert (len(chain.get_joint_parameter_names()) == n_dof), "Incorrect number of DOFs set"
 print("...\n...")
 # Number of Forward Kinematic solutions to sample
-N_fk = 1280000000 # 25600000000 # Sampling 20^8 joint configurations. NOTE: Tweak this paramter based on GPU Memory available
+# N_fk = 1280000000 # 25600000000 # Sampling 20^8 joint configurations. NOTE: Tweak this paramter based on GPU Memory available
+# N_fk = 12800000 # 25600000000 # Sampling 20^8 joint configurations. NOTE: Tweak this paramter based on GPU Memory available
+N_fk = 1280000 # 25600000000 # Sampling 20^8 joint configurations. NOTE: Tweak this paramter based on GPU Memory available
 # Map resolution and limits
 angular_res = np.pi/8 # or 22.5 degrees per bin)
 r_lim = [-np.pi, np.pi] # NOTE: Using 'intrinsic' euler rotations in XYZ
@@ -53,12 +69,12 @@ pitch_bins = math.ceil((np.pi)/angular_res)  # 8. Only half the bins needed (hal
 yaw_bins = math.ceil((2*np.pi)/angular_res)  # 16
 cartesian_res = 0.05 # metres
 x_lim = [-1.2, 1.2] #[-1.0, 1.0] # min,max in metres (Set these as per your robot links)
-y_lim = [-0.6, 1.35]#[-0.4, 1.15]
+y_lim = [-1.35, 1.35]#[-0.4, 1.15]
 z_lim = [-0.35, 2.1]#[-0.15, 1.9]
 x_bins = math.ceil((x_lim[1] - x_lim[0])/cartesian_res)
 y_bins = math.ceil((y_lim[1] - y_lim[0])/cartesian_res)
 z_bins = math.ceil((z_lim[1] - z_lim[0])/cartesian_res)
-post_process = True # Whether to filter out voxels with post processing
+post_process = False # Whether to filter out voxels with post processing
 
 
 ## Create 6D reachability map initialized with zeros
@@ -128,6 +144,30 @@ for i in range(num_loops):
     torch.cuda.empty_cache()
 
     # TODO: Filter out joint configurations that lead to self-collision and ground collision! (Try pinocchio?)
+    filtered_poses = []
+    filtered_indices = []
+    chunk_size = 1280
+    print(len(poses_6d))
+    for k in range(0, len(poses_6d), chunk_size):
+        poses = poses_6d[k:k+chunk_size]
+        indices = indices_6d[k:k+chunk_size]
+        goal_list = []
+        print(f'calculate {k} in {i}/{num_loops}')
+        for pose in poses:
+            orientation = quaternion_from_euler(pose[-3], pose[-2], pose[-1]).tolist()
+            orientation.insert(0, orientation.pop())
+            goal_list.append(pose[:3].tolist() + orientation)
+        goal_batch = Pose.from_batch_list(goal_list, tensor_args)
+        result = ik_solver.solve_batch(goal_batch)
+        success = result.success.cpu().numpy().T.flatten()
+        poses[~success] = 0
+        indices[~success] = 0
+        filtered_poses.append(poses)
+        filtered_indices.append(indices)
+        torch.cuda.empty_cache()
+    poses_6d = torch.cat(filtered_poses, dim=0)
+    indices_6d = torch.cat(filtered_indices, dim=0)
+
 
     J = chain.jacobian(th_batch)
     # Optional: Exclude torso joint jacobian
